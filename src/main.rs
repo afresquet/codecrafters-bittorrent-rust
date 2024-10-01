@@ -21,7 +21,8 @@ fn main() {
     match args.command {
         Commands::Decode { encoded_value } => {
             let decoded_value = Bencode::new(&encoded_value).unwrap();
-            println!("{}", decoded_value.to_value());
+            let value: serde_json::Value = (&decoded_value).into();
+            println!("{}", value);
         }
     }
 }
