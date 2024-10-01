@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -5,6 +7,7 @@ pub enum Bencode {
     String(String),
     Number(isize),
     List(Vec<Bencode>),
+    Dictionary(HashMap<String, Bencode>),
 }
 
 impl Bencode {
@@ -49,15 +52,45 @@ impl Bencode {
 
                 Ok(Self::List(decoded_values))
             }
-            _ => todo!(),
+            Some('d') => {
+                let mut decoded_values = HashMap::new();
+                let mut rest = &encoded_value[1..];
+
+                loop {
+                    match rest.chars().next() {
+                        Some('e') => break,
+                        None => return Err(BencodeError::MissingDelimeter),
+                        _ => {
+                            let key = Self::new(rest)?;
+                            rest = &rest[key.encoded_length()..];
+                            let Self::String(key) = key else {
+                                return Err(BencodeError::InvalidKey);
+                            };
+                            let value = Self::new(rest)?;
+                            rest = &rest[value.encoded_length()..];
+                            decoded_values.insert(key, value);
+                        }
+                    }
+                }
+
+                Ok(Self::Dictionary(decoded_values))
+            }
+            Some(c) => unreachable!("Invalid delimeter {c}"),
+            None => Err(BencodeError::EmptyInput),
         }
     }
 
     fn encoded_length(&self) -> usize {
         match self {
-            Bencode::String(s) => s.len() + 2,
+            Bencode::String(s) => s.len() + s.len().to_string().len() + 1,
             Bencode::Number(n) => n.to_string().len() + 2,
             Bencode::List(l) => l.iter().map(|v| v.encoded_length()).sum::<usize>() + 2,
+            Bencode::Dictionary(d) => {
+                d.iter()
+                    .map(|(k, v)| k.len() + 2 + v.encoded_length())
+                    .sum::<usize>()
+                    + 2
+            }
         }
     }
 }
@@ -68,15 +101,23 @@ impl From<&Bencode> for Value {
             Bencode::String(string) => Value::String(string.to_owned()),
             Bencode::Number(number) => Value::Number((*number).into()),
             Bencode::List(values) => Value::Array(values.iter().map(Into::into).collect()),
+            Bencode::Dictionary(dictionary) => Value::Object(
+                dictionary
+                    .iter()
+                    .map(|(k, v)| (k.to_owned(), v.into()))
+                    .collect(),
+            ),
         }
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BencodeError {
+    EmptyInput,
     MissingDelimeter,
     InvalidNumber,
     InvalidLength,
+    InvalidKey,
 }
 
 #[cfg(test)]
@@ -122,6 +163,53 @@ mod tests {
         assert_eq!(
             Bencode::new("l5:helloi52aee"),
             Err(BencodeError::InvalidNumber)
+        );
+    }
+
+    #[test]
+    fn decodes_dictionary() {
+        assert_eq!(
+            Bencode::new("d3:foo3:bar5:helloi52ee"),
+            Ok(Bencode::Dictionary(HashMap::from([
+                ("foo".to_string(), Bencode::String("bar".to_string())),
+                ("hello".to_string(), Bencode::Number(52))
+            ])))
+        );
+        assert_eq!(
+            Bencode::new("d3:foo3:bar5:helloi52e"),
+            Err(BencodeError::MissingDelimeter)
+        );
+        assert_eq!(
+            Bencode::new("d3:foo3:bari52e5:hello"),
+            Err(BencodeError::InvalidKey)
+        );
+        assert_eq!(
+            Bencode::new("d3a:foo3:bar5:helloi52ee"),
+            Err(BencodeError::InvalidNumber)
+        );
+        assert_eq!(
+            Bencode::new("d3:foo3:bar5:helloi52aee"),
+            Err(BencodeError::InvalidNumber)
+        );
+
+        // {"inner_dict":{"key1":"value1","key2":42,"list_key":["item1","item2",3]}}
+        assert_eq!(
+            Bencode::new("d10:inner_dictd4:key16:value14:key2i42e8:list_keyl5:item15:item2i3eeee"),
+            Ok(Bencode::Dictionary(HashMap::from([(
+                "inner_dict".to_string(),
+                Bencode::Dictionary(HashMap::from([
+                    ("key1".to_string(), Bencode::String("value1".to_string())),
+                    ("key2".to_string(), Bencode::Number(42)),
+                    (
+                        "list_key".to_string(),
+                        Bencode::List(vec![
+                            Bencode::String("item1".to_string()),
+                            Bencode::String("item2".to_string()),
+                            Bencode::Number(3),
+                        ])
+                    ),
+                ]))
+            ),])))
         );
     }
 }

@@ -1,6 +1,7 @@
 use bittorrent_starter_rust::*;
 
 use clap::{Parser, Subcommand};
+use tracing_subscriber::{fmt::layer, prelude::*};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -16,6 +17,10 @@ enum Commands {
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
 fn main() {
+    tracing_subscriber::registry()
+        .with(layer().without_time())
+        .init();
+
     let args = Args::parse();
 
     match args.command {
