@@ -18,6 +18,10 @@ impl Torrent {
         let info_hashed = hasher.finalize();
         Ok(hex::encode(info_hashed))
     }
+
+    pub fn piece_hashes(&self) -> impl Iterator<Item = String> + '_ {
+        self.info.pieces.iter().map(hex::encode)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

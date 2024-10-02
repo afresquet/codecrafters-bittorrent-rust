@@ -42,6 +42,11 @@ fn main() -> anyhow::Result<()> {
             println!("Tracker URL: {}", torrent.announce);
             println!("Length: {}", length);
             println!("Info Hash: {}", torrent.hash()?);
+            println!("Piece Length: {}", torrent.info.piece_length);
+            println!("Piece Hashes:");
+            for piece_hash in torrent.piece_hashes() {
+                println!("{piece_hash}");
+            }
         }
     }
 
