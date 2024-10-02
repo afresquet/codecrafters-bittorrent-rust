@@ -35,14 +35,7 @@ impl Torrent {
         let Keys::SingleFile { length } = self.info.keys;
         let info_hash = self.hash()?;
 
-        let tracker_request = TrackerRequest {
-            peer_id: "00112233445566778899".to_string(),
-            port: 6881,
-            uploaded: 0,
-            downloaded: 0,
-            left: length,
-            compact: 1,
-        };
+        let tracker_request = TrackerRequest::new(length);
 
         let url_params = serde_urlencoded::to_string(&tracker_request)
             .context("url-encode tracker parameters")?;

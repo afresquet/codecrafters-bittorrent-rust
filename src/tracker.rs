@@ -16,6 +16,19 @@ pub struct TrackerRequest {
     pub compact: u8,
 }
 
+impl TrackerRequest {
+    pub fn new(left: usize) -> Self {
+        Self {
+            peer_id: "00112233445566778899".to_string(),
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            left,
+            compact: 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TrackerResponse {
     pub interval: usize,
