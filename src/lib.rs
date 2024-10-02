@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use hashes::Hashes;
+
+use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -111,13 +114,96 @@ impl From<&Bencode> for Value {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum BencodeError {
+    #[error("input is empty")]
     EmptyInput,
+    #[error("missing delimeter")]
     MissingDelimeter,
+    #[error("invalid number")]
     InvalidNumber,
+    #[error("invalid length")]
     InvalidLength,
+    #[error("invalid key")]
     InvalidKey,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Torrent {
+    pub announce: String,
+    pub info: Info,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Info {
+    pub name: String,
+
+    #[serde(rename = "piece length")]
+    pub piece_length: usize,
+
+    pub pieces: Hashes,
+
+    #[serde(flatten)]
+    pub keys: Keys,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Keys {
+    SingleFile { length: usize },
+}
+
+mod hashes {
+    use std::fmt;
+    use std::ops::Deref;
+
+    use serde::de::{self, Visitor};
+    use serde::{Deserialize, Deserializer};
+
+    #[derive(Debug)]
+    pub struct Hashes(Vec<[u8; 20]>);
+
+    impl Deref for Hashes {
+        type Target = Vec<[u8; 20]>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    struct HashesVisitor;
+
+    impl<'de> Visitor<'de> for HashesVisitor {
+        type Value = Hashes;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("an integer between -2^31 and 2^31")
+        }
+
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if v.len() % 20 != 0 {
+                return Err(E::custom(format!("length is {}", v.len())));
+            }
+
+            Ok(Hashes(
+                v.chunks_exact(20)
+                    .map(|s| s.try_into().expect("is length 20"))
+                    .collect(),
+            ))
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Hashes {
+        fn deserialize<D>(deserializer: D) -> Result<Hashes, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_bytes(HashesVisitor)
+        }
+    }
 }
 
 #[cfg(test)]
