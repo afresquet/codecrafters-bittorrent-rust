@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
-use bittorrent_starter_rust::*;
+use bittorrent_starter_rust::{
+    bencode::Bencode,
+    torrent::{Keys, Torrent},
+};
 
 use clap::{Parser, Subcommand};
-use tracing::debug;
 use tracing_subscriber::{fmt::layer, prelude::*};
 
 #[derive(Parser)]
@@ -37,10 +39,9 @@ fn main() -> anyhow::Result<()> {
             let torrent: Torrent = serde_bencode::from_bytes(&data)?;
             let Keys::SingleFile { length } = torrent.info.keys;
 
-            debug!("{torrent:#?}");
-
             println!("Tracker URL: {}", torrent.announce);
             println!("Length: {}", length);
+            println!("Info Hash: {}", torrent.hash()?);
         }
     }
 
