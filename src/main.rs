@@ -1,15 +1,10 @@
-use std::{net::SocketAddrV4, path::PathBuf};
-
-use bittorrent_starter_rust::{
-    bencode::Bencode,
-    peer::Handshake,
-    torrent::{Keys, Torrent},
-};
+use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing_subscriber::{fmt::layer, prelude::*};
+
+use bittorrent_starter_rust::{bencode::Bencode, message::*, peer::*, torrent::*, Hash};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -19,11 +14,27 @@ struct Args {
 }
 
 #[derive(Subcommand)]
+#[clap(rename_all = "snake_case")]
 enum Commands {
-    Decode { encoded_value: String },
-    Info { file: PathBuf },
-    Peers { file: PathBuf },
-    Handshake { file: PathBuf, peer: String },
+    Decode {
+        encoded_value: String,
+    },
+    Info {
+        torrent: PathBuf,
+    },
+    Peers {
+        torrent: PathBuf,
+    },
+    Handshake {
+        torrent: PathBuf,
+        peer: String,
+    },
+    DownloadPiece {
+        #[arg(short)]
+        output: PathBuf,
+        torrent: PathBuf,
+        piece: usize,
+    },
 }
 
 #[tokio::main]
@@ -40,10 +51,10 @@ async fn main() -> anyhow::Result<()> {
             let value: serde_json::Value = (&decoded_value).into();
             println!("{}", value);
         }
-        Commands::Info { file } => {
-            let torrent = Torrent::new(file)?;
+        Commands::Info { torrent } => {
+            let torrent = Torrent::new(torrent).await?;
             let Keys::SingleFile { length } = torrent.info.keys;
-            let info_hash = hex::encode(torrent.hash()?);
+            let info_hash = hex::encode(torrent.info_hash()?);
 
             println!("Tracker URL: {}", torrent.announce);
             println!("Length: {}", length);
@@ -54,39 +65,67 @@ async fn main() -> anyhow::Result<()> {
                 println!("{piece_hash}");
             }
         }
-        Commands::Peers { file } => {
-            let torrent = Torrent::new(file)?;
+        Commands::Peers { torrent } => {
+            let torrent = Torrent::new(torrent).await?;
 
-            for peer in torrent.peers().await?.peers.iter() {
-                println!("{}:{}", peer.ip(), peer.port());
+            for peer in torrent.peers().await?.iter() {
+                println!("{}:{}", peer.addr.ip(), peer.addr.port());
             }
         }
-        Commands::Handshake { file, peer } => {
-            let torrent = Torrent::new(file)?;
+        Commands::Handshake { torrent, peer } => {
+            let torrent = Torrent::new(torrent).await?;
 
-            let peer: SocketAddrV4 = peer.parse().context("parse peer address")?;
-            let mut peer = tokio::net::TcpStream::connect(peer)
-                .await
-                .context("connect to peer")?;
-            let mut handshake = Handshake::new(torrent.hash()?, *b"00112233445566778899");
+            let peer = Peer::try_from(peer)?
+                .handshake(torrent.info_hash()?)
+                .await?;
 
-            {
-                // Safety: Handshake is a POD with repr(C)
-                let handshake_bytes =
-                    &mut handshake as *mut Handshake as *mut [u8; std::mem::size_of::<Handshake>()];
-                let handshake_bytes = unsafe { &mut *handshake_bytes };
+            println!("Peer ID: {}", hex::encode(peer.id()));
+        }
+        Commands::DownloadPiece {
+            output,
+            torrent,
+            piece,
+        } => {
+            let torrent = Torrent::new(torrent).await?;
+            let info_hash = torrent.info_hash()?;
 
-                peer.write_all(handshake_bytes)
-                    .await
-                    .context("write handshake")?;
-                peer.read_exact(handshake_bytes)
-                    .await
-                    .context("read handshake")?;
+            let piece_size = torrent.piece_size(piece);
+            let nblocks = piece_size.div_ceil(BLOCK_MAX);
+
+            let mut all_blocks = Vec::with_capacity(piece_size);
+
+            for peer in torrent.peers().await?.iter() {
+                let peer = peer.handshake(info_hash).await?;
+
+                let Some(peer) = peer.bitfield(piece).await? else {
+                    continue;
+                };
+
+                let mut peer = peer.interested().await?;
+
+                for block in 0..nblocks {
+                    let block_size = BLOCK_MAX.min(piece_size - BLOCK_MAX * block);
+
+                    let request = Request::new(
+                        piece.try_into()?,
+                        (block * BLOCK_MAX).try_into()?,
+                        block_size.try_into()?,
+                    );
+
+                    peer.request(request, &mut all_blocks).await?;
+                }
+
+                break;
             }
-            assert_eq!(handshake.length, 19);
-            assert_eq!(&handshake.bittorrent, b"BitTorrent protocol");
 
-            println!("Peer ID: {}", hex::encode(handshake.peer_id));
+            let hash = Hash::new(&all_blocks);
+            assert_eq!(&*hash, &torrent.info.pieces[piece]);
+
+            tokio::fs::write(&output, all_blocks)
+                .await
+                .context("write out downloaded piece")?;
+
+            println!("Piece {piece} downloaded to {}", output.display());
         }
     }
 

@@ -1,9 +1,10 @@
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::ops::Deref;
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::peer::{Peer, Uninitialized};
 
 /// Note: info_hash field is not included
 #[derive(Debug, Clone, Serialize)]
@@ -38,11 +39,9 @@ pub struct TrackerResponse {
 #[derive(Debug, Clone)]
 pub struct Peers(Vec<SocketAddrV4>);
 
-impl Deref for Peers {
-    type Target = Vec<SocketAddrV4>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Peers {
+    pub fn iter(&self) -> impl Iterator<Item = Peer<Uninitialized>> + '_ {
+        self.0.iter().map(|addr| Peer::new(*addr))
     }
 }
 
