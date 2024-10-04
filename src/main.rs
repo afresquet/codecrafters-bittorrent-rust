@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{fmt::layer, prelude::*};
 
-use bittorrent_starter_rust::{bencode::Bencode, message::*, peer::*, torrent::*, Hash};
+use bittorrent_starter_rust::{bencode::Bencode, peer::*, torrent::*};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -34,6 +34,11 @@ enum Commands {
         output: PathBuf,
         torrent: PathBuf,
         piece: usize,
+    },
+    Download {
+        #[arg(short)]
+        output: PathBuf,
+        torrent: PathBuf,
     },
 }
 
@@ -87,45 +92,23 @@ async fn main() -> anyhow::Result<()> {
             piece,
         } => {
             let torrent = Torrent::new(torrent).await?;
-            let info_hash = torrent.info_hash()?;
+            let data = torrent.download_piece(piece).await?;
 
-            let piece_size = torrent.piece_size(piece);
-            let nblocks = piece_size.div_ceil(BLOCK_MAX);
-
-            let mut all_blocks = Vec::with_capacity(piece_size);
-
-            for peer in torrent.peers().await?.iter() {
-                let peer = peer.handshake(info_hash).await?;
-
-                let Some(peer) = peer.bitfield(piece).await? else {
-                    continue;
-                };
-
-                let mut peer = peer.interested().await?;
-
-                for block in 0..nblocks {
-                    let block_size = BLOCK_MAX.min(piece_size - BLOCK_MAX * block);
-
-                    let request = Request::new(
-                        piece.try_into()?,
-                        (block * BLOCK_MAX).try_into()?,
-                        block_size.try_into()?,
-                    );
-
-                    peer.request(request, &mut all_blocks).await?;
-                }
-
-                break;
-            }
-
-            let hash = Hash::new(&all_blocks);
-            assert_eq!(&*hash, &torrent.info.pieces[piece]);
-
-            tokio::fs::write(&output, all_blocks)
+            tokio::fs::write(&output, data)
                 .await
                 .context("write out downloaded piece")?;
 
             println!("Piece {piece} downloaded to {}", output.display());
+        }
+        Commands::Download { output, torrent } => {
+            let torrent = Torrent::new(torrent).await?;
+            let data = torrent.download().await?;
+
+            tokio::fs::write(&output, data)
+                .await
+                .context("write out downloaded file")?;
+
+            println!("File downloaded to {}", output.display());
         }
     }
 

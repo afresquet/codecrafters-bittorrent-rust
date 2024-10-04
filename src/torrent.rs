@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use hashes::Hashes;
 
 use crate::{
+    message::Request,
     tracker::{Peers, TrackerRequest, TrackerResponse},
     Hash,
 };
@@ -63,6 +64,57 @@ impl Torrent {
         let Keys::SingleFile { length } = self.info.keys;
         let piece_length = self.info.piece_length;
         piece_length.min(length - piece_length * piece)
+    }
+
+    pub async fn download_piece(&self, piece: usize) -> anyhow::Result<Vec<u8>> {
+        let info_hash = self.info_hash()?;
+
+        let piece_size = self.piece_size(piece);
+        let nblocks = piece_size.div_ceil(BLOCK_MAX);
+
+        let mut all_blocks = Vec::with_capacity(piece_size);
+
+        for peer in self.peers().await?.iter() {
+            let peer = peer.handshake(info_hash).await?;
+
+            let Some(peer) = peer.bitfield(piece).await? else {
+                continue;
+            };
+
+            let mut peer = peer.interested().await?;
+
+            for block in 0..nblocks {
+                let block_size = BLOCK_MAX.min(piece_size - BLOCK_MAX * block);
+
+                let request = Request::new(
+                    piece.try_into()?,
+                    (block * BLOCK_MAX).try_into()?,
+                    block_size.try_into()?,
+                );
+
+                peer.request(request, &mut all_blocks).await?;
+            }
+
+            break;
+        }
+
+        let hash = Hash::new(&all_blocks);
+        assert_eq!(&*hash, &self.info.pieces[piece]);
+
+        Ok(all_blocks)
+    }
+
+    pub async fn download(&self) -> anyhow::Result<Vec<u8>> {
+        let Keys::SingleFile { length } = self.info.keys;
+
+        let mut file = Vec::with_capacity(length);
+
+        for piece in 0..self.info.pieces.len() {
+            let data = self.download_piece(piece).await?;
+            file.extend(data);
+        }
+
+        Ok(file)
     }
 }
 
