@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use hashes::Hashes;
+use tracing::info;
 
 use crate::{
     message::Request,
@@ -66,22 +67,36 @@ impl Torrent {
         piece_length.min(length - piece_length * piece)
     }
 
-    pub async fn download_piece(&self, piece: usize) -> anyhow::Result<Vec<u8>> {
+    pub fn pieces_size(&self, pieces: impl Iterator<Item = usize>) -> usize {
+        pieces.map(|piece| self.piece_size(piece)).sum()
+    }
+
+    pub async fn download_pieces(
+        &self,
+        pieces: impl Iterator<Item = usize> + Clone,
+    ) -> anyhow::Result<Vec<u8>> {
         let info_hash = self.info_hash()?;
 
-        let piece_size = self.piece_size(piece);
-        let nblocks = piece_size.div_ceil(BLOCK_MAX);
+        let mut all_pieces = Vec::with_capacity(self.pieces_size(pieces.clone()));
 
-        let mut all_blocks = Vec::with_capacity(piece_size);
+        // only using one peer for now
+        let Some(peer) = self.peers().await?.iter().next() else {
+            anyhow::bail!("no peer");
+        };
 
-        for peer in self.peers().await?.iter() {
-            let peer = peer.handshake(info_hash).await?;
+        let mut peer = peer
+            .handshake(info_hash)
+            .await?
+            .bitfield()
+            .await?
+            .interested()
+            .await?;
 
-            let Some(peer) = peer.bitfield(piece).await? else {
-                continue;
-            };
+        for piece in pieces.clone() {
+            let piece_size = self.piece_size(piece);
+            let nblocks = piece_size.div_ceil(BLOCK_MAX);
 
-            let mut peer = peer.interested().await?;
+            let mut all_blocks = Vec::with_capacity(piece_size);
 
             for block in 0..nblocks {
                 let block_size = BLOCK_MAX.min(piece_size - BLOCK_MAX * block);
@@ -95,26 +110,21 @@ impl Torrent {
                 peer.request(request, &mut all_blocks).await?;
             }
 
-            break;
+            let hash = Hash::new(&all_blocks);
+            assert_eq!(&*hash, &self.info.pieces[piece]);
+
+            all_pieces.extend_from_slice(&all_blocks);
+
+            info!("downloaded piece {piece}");
         }
 
-        let hash = Hash::new(&all_blocks);
-        assert_eq!(&*hash, &self.info.pieces[piece]);
-
-        Ok(all_blocks)
+        Ok(all_pieces)
     }
 
     pub async fn download(&self) -> anyhow::Result<Vec<u8>> {
-        let Keys::SingleFile { length } = self.info.keys;
+        let data = self.download_pieces(0..self.info.pieces.len()).await?;
 
-        let mut file = Vec::with_capacity(length);
-
-        for piece in 0..self.info.pieces.len() {
-            let data = self.download_piece(piece).await?;
-            file.extend(data);
-        }
-
-        Ok(file)
+        Ok(data)
     }
 }
 

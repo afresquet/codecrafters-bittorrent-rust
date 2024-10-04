@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::peer::{Peer, Uninitialized};
+use crate::peer::*;
 
 /// Note: info_hash field is not included
 #[derive(Debug, Clone, Serialize)]
@@ -40,7 +40,7 @@ pub struct TrackerResponse {
 pub struct Peers(Vec<SocketAddrV4>);
 
 impl Peers {
-    pub fn iter(&self) -> impl Iterator<Item = Peer<Uninitialized>> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = Peer<NoId, NoSession, NoPieces, NotReady>> + '_ {
         self.0.iter().map(|addr| Peer::new(*addr))
     }
 }

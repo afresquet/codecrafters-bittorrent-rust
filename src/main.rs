@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
             let torrent = Torrent::new(torrent).await?;
 
             for peer in torrent.peers().await?.iter() {
-                println!("{}:{}", peer.addr.ip(), peer.addr.port());
+                println!("{}:{}", peer.addr().ip(), peer.addr().port());
             }
         }
         Commands::Handshake { torrent, peer } => {
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
             piece,
         } => {
             let torrent = Torrent::new(torrent).await?;
-            let data = torrent.download_piece(piece).await?;
+            let data = torrent.download_pieces(std::iter::once(piece)).await?;
 
             tokio::fs::write(&output, data)
                 .await
