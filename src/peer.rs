@@ -50,8 +50,8 @@ impl Peer<NoId, NoSession, NoPieces, NotReady> {
         let bytes = handshake.as_bytes_mut();
         stream.write_all(bytes).await?;
         stream.read_exact(bytes).await?;
-        assert_eq!(handshake.length, 19);
-        assert_eq!(&handshake.bittorrent, b"BitTorrent protocol");
+        anyhow::ensure!(handshake.length == 19);
+        anyhow::ensure!(&handshake.bittorrent == b"BitTorrent protocol");
         Ok(Peer {
             addr: self.addr,
             id: Id(handshake.peer_id),
@@ -70,7 +70,7 @@ impl Peer<Id, Session, NoPieces, NotReady> {
             .await
             .expect("peer always sends a bitfields")
             .context("peer message was invalid")?;
-        assert_eq!(bitfield.tag, MessageTag::Bitfield);
+        anyhow::ensure!(bitfield.tag == MessageTag::Bitfield);
 
         let pieces = bitfield
             .payload
@@ -106,8 +106,8 @@ impl Peer<Id, Session, Pieces, NotReady> {
             .await
             .expect("peer always sends an unchoke")
             .context("peer message was invalid")?;
-        assert_eq!(unchoke.tag, MessageTag::Unchoke);
-        assert!(unchoke.payload.is_empty());
+        anyhow::ensure!(unchoke.tag == MessageTag::Unchoke);
+        anyhow::ensure!(unchoke.payload.is_empty());
 
         Ok(Peer {
             addr: self.addr,
@@ -140,13 +140,13 @@ impl Peer<Id, Session, Pieces, Ready> {
             .await
             .expect("peer always sends a piece")
             .context("peer message was invalid")?;
-        assert_eq!(piece.tag, MessageTag::Piece);
-        assert!(!piece.payload.is_empty());
+        anyhow::ensure!(piece.tag == MessageTag::Piece);
+        anyhow::ensure!(!piece.payload.is_empty());
 
         let piece = Piece::ref_from_bytes(&piece.payload[..])
             .expect("always get all Piece response fields from peer");
-        assert_eq!(piece.index(), request.index());
-        assert_eq!(piece.begin(), request.begin());
+        anyhow::ensure!(piece.index() == request.index());
+        anyhow::ensure!(piece.begin() == request.begin());
 
         blocks.extend(piece.block());
 

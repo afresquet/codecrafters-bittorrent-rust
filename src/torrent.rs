@@ -1,4 +1,8 @@
-use std::path::PathBuf;
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -77,48 +81,98 @@ impl Torrent {
     ) -> anyhow::Result<Vec<u8>> {
         let info_hash = self.info_hash()?;
 
-        let mut all_pieces = Vec::with_capacity(self.pieces_size(pieces.clone()));
+        let all_pieces = Arc::new(Mutex::new(Vec::with_capacity(
+            self.pieces_size(pieces.clone()),
+        )));
 
-        // only using one peer for now
-        let Some(peer) = self.peers().await?.iter().next() else {
-            anyhow::bail!("no peer");
-        };
+        let work_queue = Arc::new(Mutex::new(BTreeSet::from_iter(pieces)));
 
-        let mut peer = peer
-            .handshake(info_hash)
-            .await?
-            .bitfield()
-            .await?
-            .interested()
-            .await?;
+        let mut handles = Vec::new();
 
-        for piece in pieces.clone() {
-            let piece_size = self.piece_size(piece);
-            let nblocks = piece_size.div_ceil(BLOCK_MAX);
+        let piece_hashes = &self.info.pieces;
+        let Keys::SingleFile { length } = self.info.keys;
+        let piece_length = self.info.piece_length;
 
-            let mut all_blocks = Vec::with_capacity(piece_size);
+        for peer in self.peers().await?.iter() {
+            let all_pieces = all_pieces.clone();
+            let work_queue = work_queue.clone();
+            let piece_hashes = piece_hashes.clone();
 
-            for block in 0..nblocks {
-                let block_size = BLOCK_MAX.min(piece_size - BLOCK_MAX * block);
+            let handle = tokio::spawn(async move {
+                let mut peer = peer
+                    .handshake(info_hash)
+                    .await
+                    .expect("handshake")
+                    .bitfield()
+                    .await
+                    .expect("bitfield")
+                    .interested()
+                    .await
+                    .expect("interested");
 
-                let request = Request::new(
-                    piece.try_into()?,
-                    (block * BLOCK_MAX).try_into()?,
-                    block_size.try_into()?,
+                info!(
+                    "Connected to peer {}:{}",
+                    peer.addr().ip(),
+                    peer.addr().port()
                 );
 
-                peer.request(request, &mut all_blocks).await?;
-            }
+                loop {
+                    let piece = {
+                        let mut work_queue = work_queue.lock().expect("can lock mutex");
+                        let Some(piece) = work_queue.pop_first() else {
+                            break;
+                        };
+                        if !peer.pieces().contains(&piece) {
+                            work_queue.insert(piece);
+                            continue;
+                        }
+                        piece
+                    };
 
-            let hash = Hash::new(&all_blocks);
-            assert_eq!(&*hash, &self.info.pieces[piece]);
+                    info!("Downloading piece {piece}");
 
-            all_pieces.extend_from_slice(&all_blocks);
+                    let piece_size = piece_size(piece, length, piece_length);
+                    let nblocks = piece_size.div_ceil(BLOCK_MAX);
 
-            info!("downloaded piece {piece}");
+                    let mut all_blocks = Vec::with_capacity(piece_size);
+
+                    for block in 0..nblocks {
+                        let block_size = BLOCK_MAX.min(piece_size - BLOCK_MAX * block);
+
+                        let request = Request::new(
+                            piece.try_into().unwrap(),
+                            (block * BLOCK_MAX).try_into().unwrap(),
+                            block_size.try_into().unwrap(),
+                        );
+
+                        peer.request(request, &mut all_blocks)
+                            .await
+                            .expect("downloads piece");
+                    }
+
+                    let hash = Hash::new(&all_blocks);
+                    assert_eq!(*hash, piece_hashes[piece]);
+
+                    all_pieces.lock().unwrap().push((piece, all_blocks));
+
+                    info!("piece {piece} downloaded");
+                }
+            });
+
+            handles.push(handle);
         }
 
-        Ok(all_pieces)
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let mut all_pieces = all_pieces.lock().unwrap();
+        all_pieces.sort_by(|a, b| a.0.cmp(&b.0));
+
+        Ok(all_pieces
+            .iter()
+            .flat_map(|(_, piece)| piece.clone())
+            .collect())
     }
 
     pub async fn download(&self) -> anyhow::Result<Vec<u8>> {
@@ -157,7 +211,7 @@ mod hashes {
         Deserialize, Deserializer,
     };
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct Hashes(Vec<[u8; 20]>);
 
     impl Deref for Hashes {
@@ -222,4 +276,8 @@ fn urlencode(t: &[u8; 20]) -> String {
     }
 
     encoded
+}
+
+pub fn piece_size(piece: usize, length: usize, piece_length: usize) -> usize {
+    piece_length.min(length - piece_length * piece)
 }
