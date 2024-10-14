@@ -43,6 +43,14 @@ impl Peers {
     pub fn iter(&self) -> impl Iterator<Item = Peer<NoId, NoSession, NoPieces, NotReady>> + '_ {
         self.0.iter().map(|addr| Peer::new(*addr))
     }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl Serialize for Peers {

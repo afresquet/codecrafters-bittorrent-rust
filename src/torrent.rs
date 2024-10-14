@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::VecDeque,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -8,7 +8,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use hashes::Hashes;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{
     message::Request,
@@ -17,6 +17,11 @@ use crate::{
 };
 
 pub const BLOCK_MAX: usize = 1 << 14;
+
+pub struct DownloadedPiece {
+    number: usize,
+    blocks: Vec<u8>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Torrent {
@@ -81,22 +86,24 @@ impl Torrent {
     ) -> anyhow::Result<Vec<u8>> {
         let info_hash = self.info_hash()?;
 
-        let all_pieces = Arc::new(Mutex::new(Vec::with_capacity(
-            self.pieces_size(pieces.clone()),
-        )));
+        let peers = self.peers().await?;
 
-        let work_queue = Arc::new(Mutex::new(BTreeSet::from_iter(pieces)));
+        let (tx, rx) = std::sync::mpsc::sync_channel(self.pieces_size(pieces.clone()));
 
-        let mut handles = Vec::new();
+        let pieces = VecDeque::from_iter(pieces);
+        let peers_amount = pieces.len().min(peers.len());
+        let work_queue = Arc::new(Mutex::new(pieces));
+
+        let mut handles = Vec::with_capacity(peers.len());
 
         let piece_hashes = &self.info.pieces;
         let Keys::SingleFile { length } = self.info.keys;
         let piece_length = self.info.piece_length;
 
-        for peer in self.peers().await?.iter() {
-            let all_pieces = all_pieces.clone();
-            let work_queue = work_queue.clone();
+        for peer in peers.iter().take(peers_amount) {
+            let work_queue = Arc::clone(&work_queue);
             let piece_hashes = piece_hashes.clone();
+            let tx = tx.clone();
 
             let handle = tokio::spawn(async move {
                 let mut peer = peer
@@ -119,11 +126,11 @@ impl Torrent {
                 loop {
                     let piece = {
                         let mut work_queue = work_queue.lock().expect("can lock mutex");
-                        let Some(piece) = work_queue.pop_first() else {
+                        let Some(piece) = work_queue.pop_front() else {
                             break;
                         };
                         if !peer.pieces().contains(&piece) {
-                            work_queue.insert(piece);
+                            work_queue.push_back(piece);
                             continue;
                         }
                         piece
@@ -153,7 +160,12 @@ impl Torrent {
                     let hash = Hash::new(&all_blocks);
                     assert_eq!(*hash, piece_hashes[piece]);
 
-                    all_pieces.lock().unwrap().push((piece, all_blocks));
+                    if let Err(e) = tx.send(DownloadedPiece {
+                        number: piece,
+                        blocks: all_blocks,
+                    }) {
+                        error!("{e}");
+                    }
 
                     info!("piece {piece} downloaded");
                 }
@@ -162,16 +174,20 @@ impl Torrent {
             handles.push(handle);
         }
 
+        drop(tx);
+
+        let pieces_handle = std::thread::spawn(move || rx.into_iter().collect::<Vec<_>>());
+
         for handle in handles {
-            handle.await.unwrap();
+            handle.await?;
         }
 
-        let mut all_pieces = all_pieces.lock().unwrap();
-        all_pieces.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut all_pieces = pieces_handle.join().unwrap();
+        all_pieces.sort_by(|a, b| a.number.cmp(&b.number));
 
         Ok(all_pieces
-            .iter()
-            .flat_map(|(_, piece)| piece.clone())
+            .into_iter()
+            .flat_map(|downloaded_piece| downloaded_piece.blocks)
             .collect())
     }
 
